@@ -112,7 +112,7 @@ public class OfferReaderService extends AccessibilityService {
     private void cleanup() {
         instance = null;
         handler.removeCallbacksAndMessages(null);
-        if (badge != null) badge.hide();
+        hideBadge();
         if (screenReader != null) {
             screenReader.close();
             screenReader = null;
@@ -160,20 +160,40 @@ public class OfferReaderService extends AccessibilityService {
                 handler.postDelayed(watchTask, RECHECK_MS);
             }
             screenReader.request(this::onImageRead);
-            if (badge.isShowing() && now - lastOfferSeenAt > IMAGE_HOLD_MS) badge.hide();
+            if (badge.isShowing() && now - lastOfferSeenAt > IMAGE_HOLD_MS) hideBadge();
         } else {
             lookingAtImage = false;
             if (now - lastOfferSeenAt > HIDE_AFTER_MS) {
                 suppressed = false;
-                badge.hide();
+                hideBadge();
             }
         }
     }
 
     private void onImageRead(List<String> lines, OfferParser.Offer offer, String error) {
-        rememberShot(lines, offer, error);
+        boolean gone = OfferParser.isGone(lines);
+        rememberShot(lines, offer, gone ? "offer taken/expired" : error);
         if (!lookingAtImage || testing || badge == null) return; // the card is already gone
-        if (offer != null) showOffer(offer, SystemClock.uptimeMillis());
+        if (gone) {
+            // "Another driver matched to this request" etc.: take the badge down right away.
+            hideBadge();
+            lastOfferSeenAt = 0;
+            return;
+        }
+        if (offer == null) return;
+        OfferParser.Offer cur = currentOffer;
+        if (cur != null && badge.isShowing() && Math.abs(cur.fare - offer.fare) < 0.005
+                && offer.legs < cur.legs) {
+            return; // same offer, but this read missed a line: keep the better reading
+        }
+        showOffer(offer, SystemClock.uptimeMillis());
+    }
+
+    private OfferParser.Offer currentOffer;
+
+    private void hideBadge() {
+        currentOffer = null;
+        if (badge != null) badge.hide();
     }
 
     private void showOffer(OfferParser.Offer offer, long now) {
@@ -183,10 +203,11 @@ public class OfferReaderService extends AccessibilityService {
         if (now - shownSince > MAX_SHOW_MS) {
             // Same screen for a full minute (e.g. after accepting): stop covering the map.
             suppressed = true;
-            badge.hide();
+            hideBadge();
             return;
         }
         boolean wasShowing = badge.isShowing();
+        currentOffer = offer;
         badge.show(offer);
         if (!wasShowing && badge.isShowing()) {
             handler.removeCallbacks(watchTask);
@@ -409,7 +430,7 @@ public class OfferReaderService extends AccessibilityService {
         handler.postDelayed(() -> badge.show(new OfferParser.Offer(7.50, 20, 6.0)), 2000); // $22.50/hr  yellow
         handler.postDelayed(() -> badge.show(new OfferParser.Offer(6.10, 24, 9.2)), 4000); // $15.25/hr  red
         handler.postDelayed(() -> {
-            badge.hide();
+            hideBadge();
             testing = false;
         }, 6500);
     }

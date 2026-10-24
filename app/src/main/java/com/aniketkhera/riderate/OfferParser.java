@@ -19,11 +19,21 @@ public final class OfferParser {
         public final double fare;
         public final double minutes;
         public final double km;
+        /** How many time/distance lines were added up (pickup + trip = 2). */
+        public final int legs;
+        /** True when the offer showed a single "total" line (deliveries). */
+        public final boolean total;
 
         public Offer(double fare, double minutes, double km) {
+            this(fare, minutes, km, 0, false);
+        }
+
+        public Offer(double fare, double minutes, double km, int legs, boolean total) {
             this.fare = fare;
             this.minutes = minutes;
             this.km = km;
+            this.legs = legs;
+            this.total = total;
         }
 
         public double perHour() {
@@ -53,7 +63,8 @@ public final class OfferParser {
             "(\\d{1,4}(?:[.,]\\d{1,2})?)\\s*(km|kilomet(?:er|re)s?|miles?|mi|m)\\b";
     // A time followed closely by a distance: "4 mins · 1.9 km", "19 mins (9.0 km) away"
     private static final Pattern PAIR =
-            Pattern.compile(TIME + "[^\\d$]{0,18}?" + DIST, Pattern.CASE_INSENSITIVE);
+            Pattern.compile(TIME + "(?:\\s|[(\u00B7\u2022\u2219,\\-\u2013]|\\btotal\\b){0,8}?" + DIST,
+                    Pattern.CASE_INSENSITIVE);
     private static final Pattern MONEY =
             Pattern.compile("\\$\\s?(\\d{1,4}(?:[.,]\\d{1,2})?)");
 
@@ -103,8 +114,27 @@ public final class OfferParser {
             l = l.replaceAll("^[S§]\\s?(?=\\d{1,3}[.,]\\d{2}$)", "\\$");
             fixed.add(l);
         }
+        if (isGone(fixed)) return null;
         Offer o = parse(fixed);
-        return isPlausible(o) ? o : null;
+        if (!isPlausible(o)) return null;
+        // A ride card shows a pickup ("away") and a trip line. If only one was read, part of the
+        // card was covered or misread, so don't guess.
+        if (!o.total && o.legs < 2) {
+            String all = String.join(" ", fixed).toLowerCase(Locale.US);
+            if (all.contains("away") || all.matches("(?s).*\\btrip\\b.*")) return null;
+        }
+        return o;
+    }
+
+    private static final Pattern GONE = Pattern.compile(
+            "(?i)(another driver|no longer available|request (?:was )?cancel|offer expired|trip cancel)");
+
+    /** True when the card says the offer was taken, cancelled or expired. */
+    public static boolean isGone(List<String> lines) {
+        for (String l : lines) {
+            if (l != null && GONE.matcher(l).find()) return true;
+        }
+        return false;
     }
 
     /** Rejects numbers that can't be a real offer (usually a misread). */
@@ -215,16 +245,18 @@ public final class OfferParser {
 
         // Deliveries usually show one "total" line; rides show pickup + trip.
         for (Leg l : unique) {
-            if (l.total) return new Offer(fare.value, l.minutes, l.km);
+            if (l.total) return new Offer(fare.value, l.minutes, l.km, 1, true);
         }
         double minutes = 0;
         double km = 0;
+        int legCount = 0;
         for (int i = 0; i < unique.size() && i < 3; i++) {
             minutes += unique.get(i).minutes;
             km += unique.get(i).km;
+            legCount++;
         }
         if (minutes <= 0) return null;
-        return new Offer(fare.value, minutes, km);
+        return new Offer(fare.value, minutes, km, legCount, false);
     }
 
     private static List<Money> findMoney(List<String> segs, int[] starts) {

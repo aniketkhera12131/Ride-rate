@@ -83,6 +83,25 @@ public class ParserCheck {
                 "4 mins (1.6 km) away", "4337 21 Ave NW, Edmonton, AB", "T6L 6L8, Canada",
                 "4 mins (1.9 km) trip", "2331 NW 66th St Unit 417,", "Edmonton, AB T6K 4B4, Canada", "Match"),
                 4.01, 8, 3.5, 30.08);
+        // Real screenshot reads from build 5 (10:45, $5.96 offer)
+        image("Real read 10:45:29", Arrays.asList(
+                "PLAINS", "34 9", "2 UberX", "X", "H", "$5.96", "* 4.96", "8 mins (3.6 km) away", "E",
+                "9 2340 24 St NW, Edmonton, AB", "T6T 0G9, Canada", "5 mins (1.8 km) trip",
+                "1636 18 St NW, Edmonton, AB T6T", "202, Canada", "T", "Match"),
+                5.96, 13, 5.4, 27.51);
+        image("Real read 10:45:36", Arrays.asList(
+                "2 UberX", "X", "$5.96", "AL", "* 4.96", "8 mins (3.6 km) away", "9 2340 24 St NW, Edmonton, AB",
+                "L", "T6T 0G9, Canada", "A", "5 mins (1.8 km) trip", "1636 18 St NW, Edmonton, AB T6T",
+                "202, Canada", "Match", "HWA", "EDMONTON"),
+                5.96, 13, 5.4, 27.51);
+        imageNone("Real read 10:45:37 (taken by another driver, misread)", Arrays.asList(
+                "2 UberX", "X", "$5.96", "k 4.96", "Another driver matched to", "2340 2", "this request B",
+                "ton, AB", "T6T 0G9", "A", "5 mins (L8 km) tip", "1636 18 StNW. Edmonton, AB T6T",
+                "202, Canada", "Match", "HWA", "EDMONTON"));
+        imageNone("Misread with no banner", Arrays.asList(
+                "UberX", "$5.96", "4.96", "2340 24 St NW", "5 mins (L8 km) tip", "Match"));
+        imageNone("Only pickup line read", Arrays.asList(
+                "UberX", "$5.96", "4.96", "8 mins (3.6 km) away", "1636 18 St NW", "Match"));
         image("Screenshot misreads S and krn", Arrays.asList(
                 "UberX", "S8.73", "4.96", "6 mins (1.9 krn) away", "11 rnins (9.8 km) trip", "Match"),
                 8.73, 17, 11.7, 30.81);
