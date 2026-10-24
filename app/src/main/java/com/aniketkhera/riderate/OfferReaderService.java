@@ -233,20 +233,33 @@ public class OfferReaderService extends AccessibilityService {
     private static void remember(List<String> texts, OfferParser.Offer offer, String windows, int nodes, int hidden) {
         String joined = TextUtils.join(" | ", texts);
         // Screens with a $ amount are kept separately, so map/navigation updates can't push them out.
-        boolean money = offer != null || joined.contains("$");
-        Deque<String> list = money ? recentScreens : recentOther;
+        // Screens that look like an offer are kept separately, so home/map updates can't push them out.
+        boolean offerLike = offer != null || OFFER_HINT.matcher(joined).find();
+        Deque<String> list = offerLike ? recentScreens : recentOther;
+        String time = new SimpleDateFormat("HH:mm:ss", Locale.CANADA).format(new Date());
+        String summary = "items " + nodes + ", texts " + texts.size() + ", hidden " + hidden
+                + (offer != null ? ", OFFER READ" : "") + " | " + windows;
         synchronized (recentScreens) {
+            // Timeline: one short line each time the screen's shape changes.
+            String lastLine = timeline.peekFirst();
+            if (lastLine == null || !lastLine.endsWith("  " + summary)) {
+                timeline.addFirst(time + "  " + summary);
+                while (timeline.size() > 30) timeline.removeLast();
+            }
             String last = list.peekFirst();
             if (last != null && last.endsWith("\n" + clip(joined))) return; // same screen as last time
-            String time = new SimpleDateFormat("HH:mm:ss", Locale.CANADA).format(new Date());
             String entry = time + "  " + (offer != null ? "READ OK: " + offer : "no offer found")
                     + "\nWindows: " + windows
                     + "\nItems read: " + nodes + ", texts: " + texts.size() + ", hidden texts: " + hidden
                     + "\n" + clip(joined);
             list.addFirst(entry);
-            while (list.size() > (money ? 4 : 3)) list.removeLast();
+            while (list.size() > (offerLike ? 4 : 2)) list.removeLast();
         }
     }
+
+    private static final java.util.regex.Pattern OFFER_HINT = java.util.regex.Pattern.compile(
+            "(?i)(\\d\\s?km\\b|\\baccept\\b|\\baway\\b|\\bmatched\\b|\\bper hour\\b|/hr\\b)");
+    private static final Deque<String> timeline = new ArrayDeque<>();
 
     private static String clip(String s) {
         return s.length() > 1500 ? s.substring(0, 1500) + " …" : s;
@@ -262,9 +275,11 @@ public class OfferReaderService extends AccessibilityService {
                 + "\nLast check: " + lastCheck;
         synchronized (recentScreens) {
             return header
-                    + "\n\n=== Screens with $ amounts ===\n\n"
+                    + "\n\n=== Offer-like screens ===\n\n"
                     + (recentScreens.isEmpty() ? "none" : TextUtils.join("\n\n-----\n\n", recentScreens))
-                    + "\n\n=== Other Uber/Lyft screens ===\n\n"
+                    + "\n\n=== Timeline (newest first) ===\n\n"
+                    + (timeline.isEmpty() ? "none" : TextUtils.join("\n", timeline))
+                    + "\n\n=== Latest other screens ===\n\n"
                     + (recentOther.isEmpty() ? "none" : TextUtils.join("\n\n-----\n\n", recentOther));
         }
     }
