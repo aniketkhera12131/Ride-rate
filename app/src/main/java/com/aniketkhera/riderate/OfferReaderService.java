@@ -40,6 +40,7 @@ public class OfferReaderService extends AccessibilityService {
     /** Last few offer-like screens, kept in memory only, for the troubleshooting button. */
     private static final Deque<String> recentScreens = new ArrayDeque<>();
     private static final Deque<String> recentOther = new ArrayDeque<>();
+    private static final Deque<String> recentIdLike = new ArrayDeque<>();
 
     private final Handler handler = new Handler(Looper.getMainLooper());
     private Badge badge;
@@ -108,11 +109,22 @@ public class OfferReaderService extends AccessibilityService {
         winInfo.setLength(0);
         nodesSeen = 0;
         hiddenTexts = 0;
+        allTexts.clear();
+        hiddenList.clear();
+        viewIds.clear();
         List<String> texts = readOfferApps();
         OfferParser.Offer offer = texts.isEmpty() ? null : OfferParser.parse(texts);
+        boolean fromHidden = false;
+        if (offer == null && !hiddenList.isEmpty()) {
+            // Some apps report parts of the screen as "not visible" even when they are; try those too.
+            offer = OfferParser.parse(allTexts);
+            fromHidden = offer != null;
+        }
         lastCheck = new SimpleDateFormat("HH:mm:ss", Locale.CANADA).format(new Date())
                 + "  windows: " + winInfo;
-        if (appFound) remember(texts, offer, winInfo.toString(), nodesSeen, hiddenTexts);
+        if (appFound) {
+            remember(texts, hiddenList, viewIds, offer, fromHidden, winInfo.toString(), nodesSeen, hiddenTexts);
+        }
         long now = SystemClock.uptimeMillis();
 
         if (offer != null) {
@@ -142,6 +154,9 @@ public class OfferReaderService extends AccessibilityService {
     private int nodesSeen;
     private int hiddenTexts;
     private boolean appFound;
+    private final List<String> allTexts = new ArrayList<>();
+    private final List<String> hiddenList = new ArrayList<>();
+    private final Set<String> viewIds = new java.util.LinkedHashSet<>();
 
     private List<String> readOfferApps() {
         List<String> out = new ArrayList<>();
@@ -193,13 +208,22 @@ public class OfferReaderService extends AccessibilityService {
         try {
             CharSequence t = node.getText();
             CharSequence d = node.getContentDescription();
+            boolean hasT = t != null && t.length() > 0;
+            boolean hasD = d != null && d.length() > 0 && (!hasT || !d.toString().contentEquals(t));
             if (node.isVisibleToUser()) {
-                if (t != null && t.length() > 0) out.add(t.toString());
-                if (d != null && d.length() > 0 && (t == null || !d.toString().contentEquals(t))) {
-                    out.add(d.toString());
-                }
-            } else if ((t != null && t.length() > 0) || (d != null && d.length() > 0)) {
+                if (hasT) out.add(t.toString());
+                if (hasD) out.add(d.toString());
+            } else if (hasT || hasD) {
                 hiddenTexts++;
+                if (hasT) hiddenList.add(t.toString());
+                if (hasD) hiddenList.add(d.toString());
+            }
+            if (hasT) allTexts.add(t.toString());
+            if (hasD) allTexts.add(d.toString());
+            String id = node.getViewIdResourceName();
+            if (id != null && viewIds.size() < 80) {
+                int slash = id.indexOf('/');
+                viewIds.add(slash >= 0 ? id.substring(slash + 1) : id);
             }
             int n = node.getChildCount();
             for (int i = 0; i < n; i++) {
@@ -230,15 +254,27 @@ public class OfferReaderService extends AccessibilityService {
     }
 
     /** Keeps the last few different screens read from Uber/Lyft, in memory only, for troubleshooting. */
-    private static void remember(List<String> texts, OfferParser.Offer offer, String windows, int nodes, int hidden) {
+    private static void remember(List<String> texts, List<String> hidden, Set<String> ids,
+                                 OfferParser.Offer offer, boolean fromHidden,
+                                 String windows, int nodes, int hiddenCount) {
         String joined = TextUtils.join(" | ", texts);
-        // Screens with a $ amount are kept separately, so map/navigation updates can't push them out.
+        String hiddenJoined = TextUtils.join(" | ", hidden);
+        String idsJoined = TextUtils.join(", ", ids);
         // Screens that look like an offer are kept separately, so home/map updates can't push them out.
-        boolean offerLike = offer != null || OFFER_HINT.matcher(joined).find();
-        Deque<String> list = offerLike ? recentScreens : recentOther;
+        boolean offerLike = offer != null
+                || OFFER_HINT.matcher(joined).find()
+                || OFFER_HINT.matcher(hiddenJoined).find();
+        boolean idLike = !offerLike && OFFER_ID_HINT.matcher(idsJoined).find();
+        Deque<String> list = offerLike ? recentScreens : idLike ? recentIdLike : recentOther;
+        int keep = offerLike ? 4 : idLike ? 3 : 6;
         String time = new SimpleDateFormat("HH:mm:ss", Locale.CANADA).format(new Date());
-        String summary = "items " + nodes + ", texts " + texts.size() + ", hidden " + hidden
-                + (offer != null ? ", OFFER READ" : "") + " | " + windows;
+        String summary = "items " + nodes + ", texts " + texts.size() + ", hidden " + hiddenCount
+                + (offer != null ? ", OFFER READ" : "") + (offerLike && offer == null ? ", offer-like" : "")
+                + (idLike ? ", offer-like names" : "")
+                + " | " + windows;
+        String body = "Visible: " + clip(joined, 900)
+                + "\nHidden: " + clip(hiddenJoined, 500)
+                + "\nIDs: " + clip(idsJoined, 500);
         synchronized (recentScreens) {
             // Timeline: one short line each time the screen's shape changes.
             String lastLine = timeline.peekFirst();
@@ -247,23 +283,26 @@ public class OfferReaderService extends AccessibilityService {
                 while (timeline.size() > 30) timeline.removeLast();
             }
             String last = list.peekFirst();
-            if (last != null && last.endsWith("\n" + clip(joined))) return; // same screen as last time
-            String entry = time + "  " + (offer != null ? "READ OK: " + offer : "no offer found")
+            if (last != null && last.endsWith("\n" + body)) return; // same screen as last time
+            String entry = time + "  " + (offer != null ? "READ OK" + (fromHidden ? " (hidden texts)" : "") + ": " + offer
+                    : offerLike ? "offer-like, not read" : "no offer found")
                     + "\nWindows: " + windows
-                    + "\nItems read: " + nodes + ", texts: " + texts.size() + ", hidden texts: " + hidden
-                    + "\n" + clip(joined);
+                    + "\nItems read: " + nodes + ", texts: " + texts.size() + ", hidden texts: " + hiddenCount
+                    + "\n" + body;
             list.addFirst(entry);
-            while (list.size() > (offerLike ? 4 : 2)) list.removeLast();
+            while (list.size() > keep) list.removeLast();
         }
     }
 
+    private static String clip(String s, int max) {
+        return s.length() > max ? s.substring(0, max) + " …" : s;
+    }
+
+    private static final java.util.regex.Pattern OFFER_ID_HINT = java.util.regex.Pattern.compile(
+            "(?i)(offer|dispatch|fare|accept|match|request|pulse)");
     private static final java.util.regex.Pattern OFFER_HINT = java.util.regex.Pattern.compile(
             "(?i)(\\d\\s?km\\b|\\baccept\\b|\\baway\\b|\\bmatched\\b|\\bper hour\\b|/hr\\b)");
     private static final Deque<String> timeline = new ArrayDeque<>();
-
-    private static String clip(String s) {
-        return s.length() > 1500 ? s.substring(0, 1500) + " …" : s;
-    }
 
     private static volatile long uberEvents;
     private static volatile long lyftEvents;
@@ -277,6 +316,8 @@ public class OfferReaderService extends AccessibilityService {
             return header
                     + "\n\n=== Offer-like screens ===\n\n"
                     + (recentScreens.isEmpty() ? "none" : TextUtils.join("\n\n-----\n\n", recentScreens))
+                    + "\n\n=== Screens with offer-like view names ===\n\n"
+                    + (recentIdLike.isEmpty() ? "none" : TextUtils.join("\n\n-----\n\n", recentIdLike))
                     + "\n\n=== Timeline (newest first) ===\n\n"
                     + (timeline.isEmpty() ? "none" : TextUtils.join("\n", timeline))
                     + "\n\n=== Latest other screens ===\n\n"
