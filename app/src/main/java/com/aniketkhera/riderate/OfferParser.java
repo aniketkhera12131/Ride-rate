@@ -88,6 +88,35 @@ public final class OfferParser {
     private OfferParser() {
     }
 
+    /**
+     * For text read from a screenshot: fixes common misreads, parses, and drops results
+     * that don't make sense (better no badge than a wrong one).
+     */
+    public static Offer parseImageLines(List<String> lines) {
+        List<String> fixed = new ArrayList<>();
+        for (String line : lines) {
+            if (line == null) continue;
+            String l = line;
+            l = l.replaceAll("(?i)\\bkrn\\b", "km");
+            l = l.replaceAll("(?i)rnin", "min");
+            // "$" misread as "S" at the start of a fare, e.g. "S11.80"
+            l = l.replaceAll("^[S§]\\s?(?=\\d{1,3}[.,]\\d{2}$)", "\\$");
+            fixed.add(l);
+        }
+        Offer o = parse(fixed);
+        return isPlausible(o) ? o : null;
+    }
+
+    /** Rejects numbers that can't be a real offer (usually a misread). */
+    public static boolean isPlausible(Offer o) {
+        if (o == null) return false;
+        if (o.fare < 2 || o.fare > 500) return false;
+        if (o.minutes < 2 || o.minutes > 300) return false;
+        if (o.km < 0.3 || o.km > 400) return false;
+        double kmh = o.km / (o.minutes / 60.0);
+        return kmh >= 3 && kmh <= 130;
+    }
+
     /** @param rawTexts every piece of text on screen, in screen order. Returns null if no offer is showing. */
     public static Offer parse(List<String> rawTexts) {
         List<String> segs = new ArrayList<>();

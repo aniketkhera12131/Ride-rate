@@ -51,6 +51,8 @@ public class MainActivity extends Activity {
                 + "or \"Downloaded apps\") and switch it on.", 15, false, GREY));
         col.addView(button("Turn on reader", v ->
                 startActivity(new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))));
+        col.addView(text("Just updated Ride Rate? Switch it off and on again once, so Android allows "
+                + "the new screenshot reading.", 14, false, GREY));
         col.addView(text("Switch greyed out? Tap \"Open App info\", then the ⋮ menu at the top right, "
                 + "then \"Allow restricted settings\". Then do Step 1 again.", 14, false, GREY));
         col.addView(button("Open App info", v -> {
@@ -75,9 +77,11 @@ public class MainActivity extends Activity {
                 + "Both numbers count pickup + trip together.", 15, false, Color.BLACK));
 
         col.addView(heading("What it reads"));
-        col.addView(text("Ride Rate reads the text of ride and delivery offers on your screen in the "
-                + "Uber Driver and Lyft Driver apps, only to work out these two numbers. Nothing is saved "
-                + "or sent anywhere, and it never taps anything for you.", 14, false, GREY));
+        col.addView(text("Ride Rate reads ride and delivery offers on your screen in the Uber Driver and "
+                + "Lyft Driver apps, only to work out these two numbers. Uber hides its offer card from "
+                + "screen readers, so while an offer card is up Ride Rate reads a screenshot of it on your "
+                + "phone. Screenshots are thrown away right after reading. Nothing is saved or sent "
+                + "anywhere, and it never taps anything for you.", 14, false, GREY));
 
         col.addView(heading("Numbers not showing?"));
         col.addView(text("Let an offer come in, then open this app and tap below. Copy the text and "

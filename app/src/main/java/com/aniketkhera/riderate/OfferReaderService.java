@@ -17,13 +17,19 @@ import java.util.Arrays;
 import java.util.Date;
 import java.util.Deque;
 import java.util.HashSet;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Set;
+import java.util.regex.Pattern;
 
 /**
- * Reads the screen of the Uber Driver and Lyft Driver apps (read only — it never taps anything)
- * and shows the $/hr and $/km badge while an offer is on screen.
+ * Watches the Uber Driver and Lyft Driver apps (read only — it never taps anything) and shows
+ * the $/hr and $/km badge while an offer is on screen.
+ *
+ * 1. If the offer's text can be read directly, that is used.
+ * 2. Uber hides its offer card from screen readers, so when the card appears (Uber's screen
+ *    suddenly has almost no readable text) a screenshot is read on the phone instead.
  */
 public class OfferReaderService extends AccessibilityService {
 
@@ -34,19 +40,22 @@ public class OfferReaderService extends AccessibilityService {
             "com.lyft.android.driver"   // Lyft Driver
     ));
     private static final int MAX_NODES = 2500;
-    private static final long HIDE_AFTER_MS = 1200;
+    private static final long HIDE_AFTER_MS = 1200;      // text path: hide this soon after the offer goes
+    private static final long IMAGE_HOLD_MS = 3500;      // screenshot path: keep badge through a missed read
     private static final long MAX_SHOW_MS = 60_000;
+    private static final long RECHECK_MS = 1000;
 
-    /** Last few offer-like screens, kept in memory only, for the troubleshooting button. */
-    private static final Deque<String> recentScreens = new ArrayDeque<>();
-    private static final Deque<String> recentOther = new ArrayDeque<>();
-    private static final Deque<String> recentIdLike = new ArrayDeque<>();
+    // Readable text that looks like part of an offer (used with a $ amount on screen).
+    private static final Pattern OFFER_HINT = Pattern.compile(
+            "(?i)(\\d\\s?km\\b|\\baccept\\b|\\baway\\b|\\bmatch\\b|/hr\\b)");
 
     private final Handler handler = new Handler(Looper.getMainLooper());
     private Badge badge;
+    private ScreenReader screenReader;
     private boolean scanQueued;
     private boolean testing;
     private boolean suppressed;
+    private boolean lookingAtImage;   // an offer card seems to be up but its text is hidden
     private long lastOfferSeenAt;
     private long shownSince;
 
@@ -55,13 +64,14 @@ public class OfferReaderService extends AccessibilityService {
         scan();
     };
 
-    // While the badge is up, keep checking so it disappears as soon as the offer does.
+    // While the badge is up or a hidden card is on screen, keep checking about once a second.
     private final Runnable watchTask = new Runnable() {
         @Override
         public void run() {
-            if (badge == null || !badge.isShowing() || testing) return;
+            if (badge == null || testing) return;
+            if (!badge.isShowing() && !lookingAtImage) return;
             scan();
-            if (badge.isShowing()) handler.postDelayed(this, 700);
+            if (badge.isShowing() || lookingAtImage) handler.postDelayed(this, RECHECK_MS);
         }
     };
 
@@ -70,6 +80,7 @@ public class OfferReaderService extends AccessibilityService {
         super.onServiceConnected();
         instance = this;
         badge = new Badge(this);
+        if (ScreenReader.supported()) screenReader = new ScreenReader(this);
     }
 
     @Override
@@ -102,7 +113,13 @@ public class OfferReaderService extends AccessibilityService {
         instance = null;
         handler.removeCallbacksAndMessages(null);
         if (badge != null) badge.hide();
+        if (screenReader != null) {
+            screenReader.close();
+            screenReader = null;
+        }
     }
+
+    // ---------------------------------------------------------------- main loop
 
     private void scan() {
         if (testing) return;
@@ -116,52 +133,85 @@ public class OfferReaderService extends AccessibilityService {
         OfferParser.Offer offer = texts.isEmpty() ? null : OfferParser.parse(texts);
         boolean fromHidden = false;
         if (offer == null && !hiddenList.isEmpty()) {
-            // Some apps report parts of the screen as "not visible" even when they are; try those too.
             offer = OfferParser.parse(allTexts);
             fromHidden = offer != null;
         }
-        lastCheck = new SimpleDateFormat("HH:mm:ss", Locale.CANADA).format(new Date())
-                + "  windows: " + winInfo;
+
+        String joined = TextUtils.join(" | ", texts);
+        // Uber's offer card hides itself: the whole Uber screen suddenly has (almost) no text.
+        boolean cardHidden = appOnTop && texts.size() <= 2 && nodesSeen >= 10;
+        boolean looksLikeOffer = appOnTop && joined.contains("$") && OFFER_HINT.matcher(joined).find();
+        boolean wantImage = offer == null && (cardHidden || looksLikeOffer);
+
+        lastCheck = stamp() + "  windows: " + winInfo + (wantImage ? "  [reading screenshot]" : "");
         if (appFound) {
-            remember(texts, hiddenList, viewIds, offer, fromHidden, winInfo.toString(), nodesSeen, hiddenTexts);
+            remember(texts, hiddenList, viewIds, offer, fromHidden, winInfo.toString(), nodesSeen, hiddenTexts,
+                    wantImage);
         }
         long now = SystemClock.uptimeMillis();
 
         if (offer != null) {
-            lastOfferSeenAt = now;
-            if (suppressed) return;
-            if (!badge.isShowing()) shownSince = now;
-            if (now - shownSince > MAX_SHOW_MS) {
-                // Same screen for a full minute (e.g. after accepting): stop covering the map.
-                suppressed = true;
-                badge.hide();
-                return;
-            }
-            boolean wasShowing = badge.isShowing();
-            badge.show(offer);
-            if (!wasShowing && badge.isShowing()) {
+            lookingAtImage = false;
+            showOffer(offer, now);
+        } else if (wantImage && screenReader != null) {
+            if (!lookingAtImage) {
+                lookingAtImage = true;
                 handler.removeCallbacks(watchTask);
-                handler.postDelayed(watchTask, 700);
+                handler.postDelayed(watchTask, RECHECK_MS);
             }
-        } else if (now - lastOfferSeenAt > HIDE_AFTER_MS) {
-            suppressed = false;
-            badge.hide();
+            screenReader.request(this::onImageRead);
+            if (badge.isShowing() && now - lastOfferSeenAt > IMAGE_HOLD_MS) badge.hide();
+        } else {
+            lookingAtImage = false;
+            if (now - lastOfferSeenAt > HIDE_AFTER_MS) {
+                suppressed = false;
+                badge.hide();
+            }
         }
     }
 
-    // Troubleshooting details for the current scan (memory only).
+    private void onImageRead(List<String> lines, OfferParser.Offer offer, String error) {
+        rememberShot(lines, offer, error);
+        if (!lookingAtImage || testing || badge == null) return; // the card is already gone
+        if (offer != null) showOffer(offer, SystemClock.uptimeMillis());
+    }
+
+    private void showOffer(OfferParser.Offer offer, long now) {
+        lastOfferSeenAt = now;
+        if (suppressed) return;
+        if (!badge.isShowing()) shownSince = now;
+        if (now - shownSince > MAX_SHOW_MS) {
+            // Same screen for a full minute (e.g. after accepting): stop covering the map.
+            suppressed = true;
+            badge.hide();
+            return;
+        }
+        boolean wasShowing = badge.isShowing();
+        badge.show(offer);
+        if (!wasShowing && badge.isShowing()) {
+            handler.removeCallbacks(watchTask);
+            handler.postDelayed(watchTask, RECHECK_MS);
+        }
+    }
+
+    // ---------------------------------------------------------------- reading screen text
+
+    // Details for the current scan (memory only).
     private final StringBuilder winInfo = new StringBuilder();
     private int nodesSeen;
     private int hiddenTexts;
     private boolean appFound;
+    private boolean appOnTop;
     private final List<String> allTexts = new ArrayList<>();
     private final List<String> hiddenList = new ArrayList<>();
-    private final Set<String> viewIds = new java.util.LinkedHashSet<>();
+    private final Set<String> viewIds = new LinkedHashSet<>();
 
     private List<String> readOfferApps() {
         List<String> out = new ArrayList<>();
         int[] budget = {MAX_NODES};
         appFound = false;
+        appOnTop = false;
+        boolean sawAppWindow = false;
         List<AccessibilityWindowInfo> windows = null;
         try {
             windows = getWindows();
@@ -176,10 +226,15 @@ public class OfferReaderService extends AccessibilityService {
                     root = null;
                 }
                 CharSequence pkg = root != null ? root.getPackageName() : null;
+                boolean ours = pkg != null && APPS.contains(pkg.toString());
+                if (w.getType() == AccessibilityWindowInfo.TYPE_APPLICATION && !sawAppWindow) {
+                    sawAppWindow = true;            // windows come top-most first
+                    appOnTop = ours;
+                }
                 if (winInfo.length() > 0) winInfo.append(", ");
                 winInfo.append(shortName(pkg)).append('/').append(windowType(w.getType()));
                 if (root == null) winInfo.append("(no content)");
-                if (pkg == null || !APPS.contains(pkg.toString())) continue;
+                if (!ours) continue;
                 appFound = true;
                 int before = nodesSeen;
                 walk(root, out, budget, 0);
@@ -195,6 +250,7 @@ public class OfferReaderService extends AccessibilityService {
             if (root != null && root.getPackageName() != null
                     && APPS.contains(root.getPackageName().toString())) {
                 appFound = true;
+                appOnTop = true;
                 winInfo.append(" + active window");
                 walk(root, out, budget, 0);
             }
@@ -253,30 +309,53 @@ public class OfferReaderService extends AccessibilityService {
         }
     }
 
-    /** Keeps the last few different screens read from Uber/Lyft, in memory only, for troubleshooting. */
+    // ---------------------------------------------------------------- troubleshooting (memory only)
+
+    private static final Object LOCK = new Object();
+    private static final Deque<String> recentShots = new ArrayDeque<>();
+    private static final Deque<String> recentOffers = new ArrayDeque<>();
+    private static final Deque<String> recentOther = new ArrayDeque<>();
+    private static final Deque<String> timeline = new ArrayDeque<>();
+    private static volatile long uberEvents;
+    private static volatile long lyftEvents;
+    private static volatile long shotsRead;
+    private static volatile long shotsWithOffer;
+    private static volatile String lastCheck = "none yet";
+
+    private static String stamp() {
+        return new SimpleDateFormat("HH:mm:ss", Locale.CANADA).format(new Date());
+    }
+
+    private static void rememberShot(List<String> lines, OfferParser.Offer offer, String error) {
+        shotsRead++;
+        if (offer != null) shotsWithOffer++;
+        String entry = stamp() + "  " + (offer != null ? "READ OK: " + offer
+                : error != null ? error : "no offer found in screenshot")
+                + "\nText: " + clip(TextUtils.join(" | ", lines), 700);
+        synchronized (LOCK) {
+            String last = recentShots.peekFirst();
+            if (last != null && last.substring(last.indexOf("  ")).equals(entry.substring(entry.indexOf("  ")))) {
+                recentShots.removeFirst(); // same result as last time: keep just the newest
+            }
+            recentShots.addFirst(entry);
+            while (recentShots.size() > 5) recentShots.removeLast();
+        }
+    }
+
     private static void remember(List<String> texts, List<String> hidden, Set<String> ids,
                                  OfferParser.Offer offer, boolean fromHidden,
-                                 String windows, int nodes, int hiddenCount) {
+                                 String windows, int nodes, int hiddenCount, boolean wantImage) {
         String joined = TextUtils.join(" | ", texts);
-        String hiddenJoined = TextUtils.join(" | ", hidden);
-        String idsJoined = TextUtils.join(", ", ids);
-        // Screens that look like an offer are kept separately, so home/map updates can't push them out.
-        boolean offerLike = offer != null
-                || OFFER_HINT.matcher(joined).find()
-                || OFFER_HINT.matcher(hiddenJoined).find();
-        boolean idLike = !offerLike && OFFER_ID_HINT.matcher(idsJoined).find();
-        Deque<String> list = offerLike ? recentScreens : idLike ? recentIdLike : recentOther;
-        int keep = offerLike ? 4 : idLike ? 3 : 6;
-        String time = new SimpleDateFormat("HH:mm:ss", Locale.CANADA).format(new Date());
+        boolean offerLike = offer != null || wantImage;
+        Deque<String> list = offerLike ? recentOffers : recentOther;
+        String time = stamp();
         String summary = "items " + nodes + ", texts " + texts.size() + ", hidden " + hiddenCount
-                + (offer != null ? ", OFFER READ" : "") + (offerLike && offer == null ? ", offer-like" : "")
-                + (idLike ? ", offer-like names" : "")
+                + (offer != null ? ", OFFER READ" : "") + (wantImage ? ", screenshot" : "")
                 + " | " + windows;
         String body = "Visible: " + clip(joined, 900)
-                + "\nHidden: " + clip(hiddenJoined, 500)
-                + "\nIDs: " + clip(idsJoined, 500);
-        synchronized (recentScreens) {
-            // Timeline: one short line each time the screen's shape changes.
+                + "\nHidden: " + clip(TextUtils.join(" | ", hidden), 400)
+                + "\nIDs: " + clip(TextUtils.join(", ", ids), 400);
+        synchronized (LOCK) {
             String lastLine = timeline.peekFirst();
             if (lastLine == null || !lastLine.endsWith("  " + summary)) {
                 timeline.addFirst(time + "  " + summary);
@@ -285,12 +364,11 @@ public class OfferReaderService extends AccessibilityService {
             String last = list.peekFirst();
             if (last != null && last.endsWith("\n" + body)) return; // same screen as last time
             String entry = time + "  " + (offer != null ? "READ OK" + (fromHidden ? " (hidden texts)" : "") + ": " + offer
-                    : offerLike ? "offer-like, not read" : "no offer found")
+                    : wantImage ? "text hidden, using screenshot" : "no offer found")
                     + "\nWindows: " + windows
-                    + "\nItems read: " + nodes + ", texts: " + texts.size() + ", hidden texts: " + hiddenCount
                     + "\n" + body;
             list.addFirst(entry);
-            while (list.size() > keep) list.removeLast();
+            while (list.size() > 3) list.removeLast();
         }
     }
 
@@ -298,26 +376,18 @@ public class OfferReaderService extends AccessibilityService {
         return s.length() > max ? s.substring(0, max) + " …" : s;
     }
 
-    private static final java.util.regex.Pattern OFFER_ID_HINT = java.util.regex.Pattern.compile(
-            "(?i)(offer|dispatch|fare|accept|match|request|pulse)");
-    private static final java.util.regex.Pattern OFFER_HINT = java.util.regex.Pattern.compile(
-            "(?i)(\\d\\s?km\\b|\\baccept\\b|\\baway\\b|\\bmatched\\b|\\bper hour\\b|/hr\\b)");
-    private static final Deque<String> timeline = new ArrayDeque<>();
-
-    private static volatile long uberEvents;
-    private static volatile long lyftEvents;
-    private static volatile String lastCheck = "none yet";
-
     static String lastScreensText() {
         String header = "Ride Rate " + BuildConfig.VERSION_NAME
+                + "\nScreenshot reading: " + (ScreenReader.supported() ? "available" : "needs Android 11+")
                 + "\nScreen updates seen: Uber " + uberEvents + ", Lyft " + lyftEvents
+                + "\nScreenshots read: " + shotsRead + ", with an offer: " + shotsWithOffer
                 + "\nLast check: " + lastCheck;
-        synchronized (recentScreens) {
+        synchronized (LOCK) {
             return header
-                    + "\n\n=== Offer-like screens ===\n\n"
-                    + (recentScreens.isEmpty() ? "none" : TextUtils.join("\n\n-----\n\n", recentScreens))
-                    + "\n\n=== Screens with offer-like view names ===\n\n"
-                    + (recentIdLike.isEmpty() ? "none" : TextUtils.join("\n\n-----\n\n", recentIdLike))
+                    + "\n\n=== Screenshot reads ===\n\n"
+                    + (recentShots.isEmpty() ? "none" : TextUtils.join("\n\n-----\n\n", recentShots))
+                    + "\n\n=== Offer screens ===\n\n"
+                    + (recentOffers.isEmpty() ? "none" : TextUtils.join("\n\n-----\n\n", recentOffers))
                     + "\n\n=== Timeline (newest first) ===\n\n"
                     + (timeline.isEmpty() ? "none" : TextUtils.join("\n", timeline))
                     + "\n\n=== Latest other screens ===\n\n"
@@ -325,10 +395,13 @@ public class OfferReaderService extends AccessibilityService {
         }
     }
 
+    // ---------------------------------------------------------------- test badge
+
     /** Green, yellow and red sample badges, two seconds each. */
     void showTestBadges() {
         if (badge == null) return;
         testing = true;
+        lookingAtImage = false;
         handler.removeCallbacks(watchTask);
         handler.removeCallbacks(scanTask);
         scanQueued = false;

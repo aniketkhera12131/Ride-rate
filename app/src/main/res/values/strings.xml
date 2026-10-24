@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">Ride Rate</string>
-    <string name="reader_description">Reads ride and delivery offers on screen in the Uber Driver and Lyft Driver apps to show dollars per hour and dollars per km. Nothing is saved or sent anywhere, and it never taps anything for you.</string>
+    <string name="reader_description">Reads ride and delivery offers in the Uber Driver and Lyft Driver apps to show dollars per hour and dollars per km. When Uber hides an offer from screen readers, it reads a screenshot of the offer on your phone instead. Nothing is saved or sent anywhere, and it never taps anything for you.</string>
 </resources>

@@ -66,6 +66,31 @@ public class ParserCheck {
                 "UberX", "$6.10", "11 mins (4.2 km) away", "13 mins (5.0 km) trip", "Accept"),
                 6.10, 24, 9.2, 15.25);
 
+        // Real Uber offers (Oct 24), as the screenshot reader sees the lower part of the screen
+        image("Uber $11.80 screenshot", Arrays.asList(
+                "CHAPPELLE", "AREA", "UberX", "$11.80", "4.95",
+                "6 mins (2.3 km) away", "1157 Knottwood Rd E, Edmonton,", "AB T6K, Canada",
+                "16 mins (15.7 km) trip", "5164 Windermere Blvd NW,", "Edmonton, AB T6W 0L9, Canada", "Accept"),
+                11.80, 22, 18.0, 32.18);
+        image("Uber $8.73 screenshot", Arrays.asList(
+                "MENISA", "ELLERSLIE", "UberX", "$8.73", "4.96",
+                "6 mins (1.9 km) away", "3311 58 St NW, Edmonton, AB T6L", "6X3, Canada",
+                "11 mins (9.8 km) trip", "1643 102 St NW, Edmonton, AB", "T6N 0B1, Canada", "Match"),
+                8.73, 17, 11.7, 30.81);
+        image("Uber $4.01 screenshot + badge", Arrays.asList(
+                "$30.08/hr", "$1.15/km", "MEYOKUMIN", "50 ST NW", "POLLARD", "MEADOWS",
+                "UberX", "$4.01", "4.80", "Verified",
+                "4 mins (1.6 km) away", "4337 21 Ave NW, Edmonton, AB", "T6L 6L8, Canada",
+                "4 mins (1.9 km) trip", "2331 NW 66th St Unit 417,", "Edmonton, AB T6K 4B4, Canada", "Match"),
+                4.01, 8, 3.5, 30.08);
+        image("Screenshot misreads S and krn", Arrays.asList(
+                "UberX", "S8.73", "4.96", "6 mins (1.9 krn) away", "11 rnins (9.8 km) trip", "Match"),
+                8.73, 17, 11.7, 30.81);
+        imageNone("Misread to nonsense", Arrays.asList(
+                "UberX", "$873", "6 mins (19 km) away", "1 mins (98 km) trip", "Match"));
+        imageNone("Home screen screenshot", Arrays.asList(
+                "Quest", "$73 extra for 40 trips", "1/40", "Finding trips", "1-16 min", "1-5 min"));
+
         // Screens that are not offers
         none("Home screen", Arrays.asList("$123.45", "Today", "You're online", "Finding trips"));
         none("Map only", Arrays.asList("Turn left", "20 m", "Edmonton"));
@@ -85,6 +110,24 @@ public class ParserCheck {
                 && Math.abs(o.minutes - min) < 0.01
                 && Math.abs(o.km - km) < 0.06
                 && Math.abs(o.perHour() - perHour) < 0.01;
+        System.out.println((ok ? "PASS  " : "FAIL  ") + name + "  ->  " + o);
+        if (!ok) failures++;
+    }
+
+    private static void image(String name, List<String> lines, double fare, double min, double km, double perHour) {
+        OfferParser.Offer o = OfferParser.parseImageLines(lines);
+        boolean ok = o != null
+                && Math.abs(o.fare - fare) < 0.001
+                && Math.abs(o.minutes - min) < 0.01
+                && Math.abs(o.km - km) < 0.06
+                && Math.abs(o.perHour() - perHour) < 0.01;
+        System.out.println((ok ? "PASS  " : "FAIL  ") + name + "  ->  " + o);
+        if (!ok) failures++;
+    }
+
+    private static void imageNone(String name, List<String> lines) {
+        OfferParser.Offer o = OfferParser.parseImageLines(lines);
+        boolean ok = o == null;
         System.out.println((ok ? "PASS  " : "FAIL  ") + name + "  ->  " + o);
         if (!ok) failures++;
     }
