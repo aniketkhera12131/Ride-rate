@@ -1,0 +1,44 @@
+plugins {
+    id 'com.android.application'
+}
+
+// Each GitHub build gets a higher version number, so a new build installs over the old one.
+def buildNumber = (System.getenv('GITHUB_RUN_NUMBER') ?: '1').toInteger()
+
+android {
+    namespace 'com.aniketkhera.riderate'
+    compileSdk 35
+
+    defaultConfig {
+        applicationId 'com.aniketkhera.riderate'
+        minSdk 26
+        targetSdk 34
+        versionCode buildNumber
+        versionName "1.0.${buildNumber}"
+    }
+
+    // A fixed test key, so every build can update the app without uninstalling it first.
+    signingConfigs {
+        debug {
+            storeFile file('debug.keystore')
+            storePassword 'android'
+            keyAlias 'androiddebugkey'
+            keyPassword 'android'
+        }
+    }
+
+    buildTypes {
+        debug {
+            signingConfig signingConfigs.debug
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+}
+
+tasks.withType(JavaCompile).configureEach {
+    options.encoding = 'UTF-8'
+}
