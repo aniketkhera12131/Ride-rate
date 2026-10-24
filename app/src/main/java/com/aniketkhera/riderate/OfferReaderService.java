@@ -10,9 +10,11 @@ import android.view.accessibility.AccessibilityEvent;
 import android.view.accessibility.AccessibilityNodeInfo;
 import android.view.accessibility.AccessibilityWindowInfo;
 
+import java.text.SimpleDateFormat;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Date;
 import java.util.Deque;
 import java.util.HashSet;
 import java.util.List;
@@ -37,6 +39,7 @@ public class OfferReaderService extends AccessibilityService {
 
     /** Last few offer-like screens, kept in memory only, for the troubleshooting button. */
     private static final Deque<String> recentScreens = new ArrayDeque<>();
+    private static final Deque<String> recentOther = new ArrayDeque<>();
 
     private final Handler handler = new Handler(Looper.getMainLooper());
     private Badge badge;
@@ -70,6 +73,9 @@ public class OfferReaderService extends AccessibilityService {
 
     @Override
     public void onAccessibilityEvent(AccessibilityEvent event) {
+        CharSequence src = event.getPackageName();
+        if (src != null && src.toString().equals("com.ubercab.driver")) uberEvents++;
+        else if (src != null && src.toString().equals("com.lyft.android.driver")) lyftEvents++;
         if (testing || scanQueued || badge == null) return;
         scanQueued = true;
         handler.postDelayed(scanTask, 200);
@@ -99,9 +105,14 @@ public class OfferReaderService extends AccessibilityService {
 
     private void scan() {
         if (testing) return;
+        winInfo.setLength(0);
+        nodesSeen = 0;
+        hiddenTexts = 0;
         List<String> texts = readOfferApps();
         OfferParser.Offer offer = texts.isEmpty() ? null : OfferParser.parse(texts);
-        if (!texts.isEmpty()) remember(texts, offer);
+        lastCheck = new SimpleDateFormat("HH:mm:ss", Locale.CANADA).format(new Date())
+                + "  windows: " + winInfo;
+        if (appFound) remember(texts, offer, winInfo.toString(), nodesSeen, hiddenTexts);
         long now = SystemClock.uptimeMillis();
 
         if (offer != null) {
@@ -126,10 +137,16 @@ public class OfferReaderService extends AccessibilityService {
         }
     }
 
+    // Troubleshooting details for the current scan (memory only).
+    private final StringBuilder winInfo = new StringBuilder();
+    private int nodesSeen;
+    private int hiddenTexts;
+    private boolean appFound;
+
     private List<String> readOfferApps() {
         List<String> out = new ArrayList<>();
         int[] budget = {MAX_NODES};
-        boolean found = false;
+        appFound = false;
         List<AccessibilityWindowInfo> windows = null;
         try {
             windows = getWindows();
@@ -143,14 +160,18 @@ public class OfferReaderService extends AccessibilityService {
                 } catch (RuntimeException e) {
                     root = null;
                 }
-                if (root == null) continue;
-                CharSequence pkg = root.getPackageName();
+                CharSequence pkg = root != null ? root.getPackageName() : null;
+                if (winInfo.length() > 0) winInfo.append(", ");
+                winInfo.append(shortName(pkg)).append('/').append(windowType(w.getType()));
+                if (root == null) winInfo.append("(no content)");
                 if (pkg == null || !APPS.contains(pkg.toString())) continue;
-                found = true;
+                appFound = true;
+                int before = nodesSeen;
                 walk(root, out, budget, 0);
+                winInfo.append('(').append(nodesSeen - before).append(" items)");
             }
         }
-        if (!found) {
+        if (!appFound) {
             AccessibilityNodeInfo root = null;
             try {
                 root = getRootInActiveWindow();
@@ -158,6 +179,8 @@ public class OfferReaderService extends AccessibilityService {
             }
             if (root != null && root.getPackageName() != null
                     && APPS.contains(root.getPackageName().toString())) {
+                appFound = true;
+                winInfo.append(" + active window");
                 walk(root, out, budget, 0);
             }
         }
@@ -166,14 +189,17 @@ public class OfferReaderService extends AccessibilityService {
 
     private void walk(AccessibilityNodeInfo node, List<String> out, int[] budget, int depth) {
         if (node == null || budget[0]-- <= 0 || depth > 80) return;
+        nodesSeen++;
         try {
+            CharSequence t = node.getText();
+            CharSequence d = node.getContentDescription();
             if (node.isVisibleToUser()) {
-                CharSequence t = node.getText();
                 if (t != null && t.length() > 0) out.add(t.toString());
-                CharSequence d = node.getContentDescription();
                 if (d != null && d.length() > 0 && (t == null || !d.toString().contentEquals(t))) {
                     out.add(d.toString());
                 }
+            } else if ((t != null && t.length() > 0) || (d != null && d.length() > 0)) {
+                hiddenTexts++;
             }
             int n = node.getChildCount();
             for (int i = 0; i < n; i++) {
@@ -184,27 +210,62 @@ public class OfferReaderService extends AccessibilityService {
         }
     }
 
-    private static void remember(List<String> texts, OfferParser.Offer offer) {
-        String joined = TextUtils.join(" | ", texts);
-        String lower = joined.toLowerCase(Locale.US);
-        boolean offerLike = offer != null
-                || (joined.contains("$") && lower.contains("min") && (lower.contains("km") || lower.contains(" m")));
-        if (!offerLike) return;
-        if (joined.length() > 4000) joined = joined.substring(0, 4000) + " …";
-        String entry = (offer != null ? "READ OK: " + offer : "NOT READ") + "\n" + joined;
-        synchronized (recentScreens) {
-            String first = recentScreens.peekFirst();
-            if (first != null && first.regionMatches(0, entry, 0, Math.min(160, Math.min(first.length(), entry.length())))) {
-                recentScreens.removeFirst(); // same screen updating: keep only the latest copy
-            }
-            recentScreens.addFirst(entry);
-            while (recentScreens.size() > 3) recentScreens.removeLast();
+    private static String shortName(CharSequence pkg) {
+        if (pkg == null) return "?";
+        String p = pkg.toString();
+        if (p.equals("com.ubercab.driver")) return "UBER";
+        if (p.equals("com.lyft.android.driver")) return "LYFT";
+        int dot = p.lastIndexOf('.');
+        return dot >= 0 ? p.substring(dot + 1) : p;
+    }
+
+    private static String windowType(int type) {
+        switch (type) {
+            case AccessibilityWindowInfo.TYPE_APPLICATION: return "app";
+            case AccessibilityWindowInfo.TYPE_SYSTEM: return "system";
+            case AccessibilityWindowInfo.TYPE_ACCESSIBILITY_OVERLAY: return "overlay";
+            case AccessibilityWindowInfo.TYPE_INPUT_METHOD: return "keyboard";
+            default: return "type" + type;
         }
     }
 
-    static String lastScreensText() {
+    /** Keeps the last few different screens read from Uber/Lyft, in memory only, for troubleshooting. */
+    private static void remember(List<String> texts, OfferParser.Offer offer, String windows, int nodes, int hidden) {
+        String joined = TextUtils.join(" | ", texts);
+        // Screens with a $ amount are kept separately, so map/navigation updates can't push them out.
+        boolean money = offer != null || joined.contains("$");
+        Deque<String> list = money ? recentScreens : recentOther;
         synchronized (recentScreens) {
-            return TextUtils.join("\n\n-----\n\n", recentScreens);
+            String last = list.peekFirst();
+            if (last != null && last.endsWith("\n" + clip(joined))) return; // same screen as last time
+            String time = new SimpleDateFormat("HH:mm:ss", Locale.CANADA).format(new Date());
+            String entry = time + "  " + (offer != null ? "READ OK: " + offer : "no offer found")
+                    + "\nWindows: " + windows
+                    + "\nItems read: " + nodes + ", texts: " + texts.size() + ", hidden texts: " + hidden
+                    + "\n" + clip(joined);
+            list.addFirst(entry);
+            while (list.size() > (money ? 4 : 3)) list.removeLast();
+        }
+    }
+
+    private static String clip(String s) {
+        return s.length() > 1500 ? s.substring(0, 1500) + " …" : s;
+    }
+
+    private static volatile long uberEvents;
+    private static volatile long lyftEvents;
+    private static volatile String lastCheck = "none yet";
+
+    static String lastScreensText() {
+        String header = "Ride Rate " + BuildConfig.VERSION_NAME
+                + "\nScreen updates seen: Uber " + uberEvents + ", Lyft " + lyftEvents
+                + "\nLast check: " + lastCheck;
+        synchronized (recentScreens) {
+            return header
+                    + "\n\n=== Screens with $ amounts ===\n\n"
+                    + (recentScreens.isEmpty() ? "none" : TextUtils.join("\n\n-----\n\n", recentScreens))
+                    + "\n\n=== Other Uber/Lyft screens ===\n\n"
+                    + (recentOther.isEmpty() ? "none" : TextUtils.join("\n\n-----\n\n", recentOther));
         }
     }
 
